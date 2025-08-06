@@ -6,7 +6,7 @@ import random
 import re
 import argparse
 import shutil
-
+from typing import Tuple, List
 # ------------------ Design Constraints ------------------ #
 NUCLEOTIDES = ['A', 'C', 'G', 'U']
 GC_MIN = 0.40
@@ -180,22 +180,70 @@ def main():
 if __name__ == '__main__':
     main()
 
-#pack
-def get_top_trigger_candidates(n, switch_seq, topk=5, score_threshold=14):
-    """Returns top `topk` trigger sequences of length `n` compatible with the given switch sequence"""
+
+def trigger_candidate(n, switch_seq):
     if not shutil.which('RNAfold'):
-        raise RuntimeError("RNAfold not found in PATH. Install ViennaRNA first.")
+        print("❌ RNAfold not found in PATH. Install ViennaRNA first.", file=sys.stderr)
+        return None
+
+    print(f"🔁 Searching for top trigger RNA candidates of length {n}...")
 
     candidates = []
     attempts = 0
     max_attempts = 100000
 
-    while len(candidates) < topk and attempts < max_attempts:
+    while len(candidates) < 10 and attempts < max_attempts:
         attempts += 1
+        try:
+            seq = generate_candidate_gc_controlled(n)
+        except Exception as e:
+            print(f"⚠️ Generation failed: {e}")
+            continue
 
-        if attempts % 500 == 0:
-            print(f"🌀 Attempt {attempts} | Collected: {len(candidates)} valid trigger(s)", flush=True)
+        gc = 100 * gc_content(seq)
+        no4 = not has_4plus_repeats(seq)
 
+        with tempfile.TemporaryDirectory() as tmpdir:
+            try:
+                mfe, structure, ensemble_div, mfe_freq = run_rnafold_p(seq, tmpdir)
+                _, combined_structure, _ = fold_trigger_plus_switch(seq, switch_seq, tmpdir)
+                rbs_exp = is_rbs_exposed(combined_structure, n, switch_seq)
+            except Exception as e:
+                print(f"⚠️ RNAfold error: {e}")
+                continue
+
+        score = score_candidate(mfe, gc, mfe_freq, ensemble_div, no4, rbs_exp, n)
+        if score >= 14:
+            candidates.append((score, seq, mfe, gc, mfe_freq, ensemble_div, no4, rbs_exp))
+            print(f"✅ Found {len(candidates)}/10 | Seq: {seq} | Score: {score:.2f} | Attempts: {attempts}")
+
+    if len(candidates) == 0:
+        print("❌ No valid candidates found.")
+        return None
+
+    # 排序并返回最高分的
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    top = candidates[0]
+    score, seq, mfe, gc, mfe_freq, ens_div, no4, rbs = top
+
+    print("\n🏆 Best Trigger RNA Found:")
+    print(f"Sequence: {seq}")
+    print(f"Score: {score:.2f}")
+    print(f"MFE: {mfe:.2f}, GC%: {gc:.1f}, MFEfreq: {mfe_freq:.2f}, EnsDiv: {ens_div:.2f}")
+    return top
+
+
+# ------------------ Fast Trigger Generator (returns 1st valid) ------------------ #
+def trigger_candidate_fast(n, switch_seq):
+    if not shutil.which('RNAfold'):
+        print("❌ RNAfold not found in PATH. Install ViennaRNA first.", file=sys.stderr)
+        return None
+
+    attempts = 0
+    max_attempts = 100000
+
+    while attempts < max_attempts:
+        attempts += 1
         try:
             seq = generate_candidate_gc_controlled(n)
         except Exception:
@@ -213,10 +261,9 @@ def get_top_trigger_candidates(n, switch_seq, topk=5, score_threshold=14):
                 continue
 
         score = score_candidate(mfe, gc, mfe_freq, ensemble_div, no4, rbs_exp, n)
-        if score >= score_threshold:
-            candidates.append((score, seq))
+        if score >= 14:
+            print(f"✅ Found valid trigger | Seq: {seq} | Score: {score:.2f} | Attempts: {attempts}")
+            return (score, seq, mfe, gc, mfe_freq, ensemble_div, no4, rbs_exp)
 
-    candidates.sort(reverse=True)
-    return [seq for (_, seq) in candidates[:topk]]
-
-
+    print("❌ No valid trigger found after 100000 attempts.")
+    return None
